@@ -1,157 +1,108 @@
-#MODULE IMPORTS
-# Streamlit is a lightweight web app framework used here to create an interactive GUI
-import streamlit as st
-# SymPy is a symbolic mathematics library in Python for algebraic computations
+# === scripts/generate_dataset.py ===
 import sympy as sp
+import random
+import csv
+import os
 from sympy import Matrix, symbols, binomial, factorial, simplify
-# PART 1: FUNCTION DEFINITIONS
-# FUNCTION: compute_cij_table
-# Description:
-#   Constructs the recursive coefficient table c(i, j), which is the cornerstone of Katz’s algorithm.
-#   These coefficients are recursively used to generate the candidate cyclic vector and its derivatives.
-# Parameters:
-#   n     - Rank of the differential module V
-#   D     - Matrix representing the connection D: V → V
-#   basis - List of basis vectors [e0, e1, ..., en-1] for the free R-module V
-# Returns:
-#   A dictionary mapping tuple (i, j) to symbolic column vectors c(i, j)
 def compute_cij_table(n, D, basis):
+    # Compute c(i, j) vectors recursively for Katz's construction
     cij = {}
-    # First construct the base level: c(0, j)
-    # Katz's formula: c(0,j) = Σ_{k=0}^{j} (-1)^k * binom(j, k) * D^k(e_{j-k})
     for j in range(n):
-        vec = Matrix.zeros(n, 1)  # Initialize a column vector of size n × 1
+        vec = Matrix.zeros(n, 1)  # Start with zero vector
         for k in range(j + 1):
-            coeff = (-1)**k * binomial(j, k)      # Alternating binomial coefficient
-            ej_k = basis[j - k]                   # Corresponding basis vector
+            coeff = (-1)**k * binomial(j, k)  # Binomial coefficient with sign
+            ej_k = basis[j - k]               # Select basis vector
             term = ej_k
-            for _ in range(k):                    # Compute D^k(e_{j-k})
-                term = D * term
-            vec += coeff * term                   # Weighted sum
-        cij[(0, j)] = vec                         # Store the result in the dictionary
-    # Now recursively compute c(i+1, j) = D(c(i, j)) + c(i, j+1)
-    for i in range(1, n):  # Up to c(n-1, j)
+            for _ in range(k):
+                term = D * term               # Apply D k times
+            vec += coeff * term               # Add term to vector
+        cij[(0, j)] = vec                     # Store base case
+    for i in range(1, n):
         for j in range(n):
-            left = D * cij.get((i - 1, j), Matrix.zeros(n, 1))
-            right = cij.get((i - 1, j + 1), Matrix.zeros(n, 1))
-            cij[(i, j)] = left + right            # Recursive step from Katz’s paper
+            left = D * cij.get((i - 1, j), Matrix.zeros(n, 1))      # D applied to c(i-1, j)
+            right = cij.get((i - 1, j + 1), Matrix.zeros(n, 1))     # c(i-1, j+1)
+            cij[(i, j)] = left + right                              # Recursive sum
     return cij
-
-# FUNCTION: compute_Di_c
-# Description:
-#   Computes the i-th derivative D^i(c) of the Katz vector c using Taylor expansion.
-#   This is used to construct the matrix [c, Dc, ..., D^{n-1}c] needed for checking cyclicity.
 def compute_Di_c(i, t_sym, a_val, cij_table):
-    vec = Matrix.zeros(cij_table[(0, 0)].rows, 1)  # Empty vector of same shape
-    x = t_sym - a_val  # Shifted variable X = t - a
-
-    # Construct D^i(c) = Σ_{j} X^j / j! * c(i, j)
+    # Compute D^i(c(t - a)) using the c(i, j) table
+    vec = Matrix.zeros(cij_table[(0,0)].rows, 1)
+    x = t_sym - a_val
     for j in range(len([k for k in cij_table.keys() if k[0] == 0])):
-        coeff = (x**j) / factorial(j)  # Taylor expansion coefficient
-        term = cij_table.get((i, j), Matrix.zeros(vec.rows, 1))
-        vec += term.multiply(coeff)    # Multiply each term and add to total
-    return simplify(vec)
-# FUNCTION: get_katz_derivatives
-# Description:
-#   Builds the full set of derivatives [c, Dc, D²c, ..., D^{n-1}c]
-#   These vectors together will be tested for linear independence
+        coeff = (x**j) / factorial(j)           # Taylor coefficient
+        vec += coeff * cij_table[(i, j)]        # Weighted sum
+    return simplify(vec)                        # Simplify result
 def get_katz_derivatives(n, t_sym, a_val, D, basis):
+    # Return list of derivatives [c, Dc, D^2c, ..., D^{n-1}c]
     cij_table = compute_cij_table(n, D, basis)
-    return [compute_Di_c(i, t_sym, a_val, cij_table) for i in range(n)]
-# FUNCTION: check_cyclicity
-# Description:
-#   Evaluates the symbolic matrix formed by [c, Dc, ..., D^{n-1}c] at t = t₀
-#   Then checks its rank and (if square) its determinant to determine cyclicity
+    derivatives = [compute_Di_c(i, t_sym, a_val, cij_table) for i in range(n)]
+    return derivatives
 def check_cyclicity(derivatives, t_sym, t_val):
-    mat = Matrix.hstack(*derivatives)          # Stack vectors horizontally to form matrix
-    mat_eval = mat.subs(t_sym, t_val).evalf()  # Substitute symbolic t with numerical t₀
-    rank = mat_eval.rank()                     # Check rank
-    # If square matrix, also compute determinant
-    if mat_eval.shape[0] == mat_eval.shape[1]:
-        det = mat_eval.det().evalf()
+    # Check if the set of derivatives forms a cyclic vector (full rank)
+    mat = Matrix.hstack(*derivatives)
+    mat_eval = mat.subs(t_sym, t_val).evalf()
+    rank = mat_eval.rank()
+    return int(rank == mat_eval.shape[0])       # 1 if cyclic, 0 otherwise
+def flatten_matrix(mat):
+    # Flatten a sympy Matrix into a 1D list of floats (row-wise)
+    return [float(val.evalf()) for row in mat.tolist() for val in row]
+def flatten_basis(basis):
+    # Flatten a list of sympy column vectors into a 1D list of floats
+    return [float(val.evalf()) for vec in basis for val in vec]
+def generate_random_D(n=3):
+    # Generate a random n x n integer matrix for D
+    return Matrix([[random.randint(0, 4) for _ in range(n)] for _ in range(n)])
+def generate_random_basis(n=3):
+    # Generate a random basis (list of n column vectors)
+    if random.random() < 0.2:
+        # 20% chance to create a rank-deficient basis
+        basis = [Matrix([[1 if i == j else 0] for i in range(n)]) for j in range(n)]
+        basis[1] = Matrix.zeros(n, 1)  # Make one vector zero
+        return basis
     else:
-        det = "N/A"
-    return rank, det, mat_eval
-# PART 2: STREAMLIT FRONTEND 
-# Title
-st.title("📐 Katz Cyclic Vector Visualizer")
-# This is a symbolic visual app that shows how Katz vectors are constructed and tested for cyclicity.
-# Sidebar Setup
-n = st.sidebar.selectbox("Select rank n", [3])  # We fix n = 3 for this experiment
-t_sym = symbols('t')  # Symbolic variable
-t_val = st.sidebar.number_input("Enter fixed value of t", value=1.0)
-k = 1 + n * (n - 1)  # Number of shift values 'a' needed for full generality (from Katz theorem)
-st.sidebar.markdown(f"**Katz: requires {k} distinct values of a**")
-# Inputs for matrix D and basis e vectors
-D_input = st.sidebar.text_area("Enter D matrix (semicolon-separated rows, comma-separated entries)")
-basis_input = st.sidebar.text_area("Enter basis vectors e (semicolon-separated rows, comma-separated entries)")
-# Default values of a: 1,2,...,k
-default_a_list = ",".join([str(i + 1) for i in range(k)])
-a_input = st.sidebar.text_input(f"Enter {k} values of a (comma-separated)", value=default_a_list)
-# === MAIN LOGIC: Part A - Katz Vector Cyclicity ===
-try:
-    # Parse D matrix
-    D = Matrix([
-        [sp.sympify(x.strip()) for x in row.strip().split(',') if x.strip()]
-        for row in D_input.strip().split(';') if row.strip()
-    ])
-    # Parse basis vectors
-    basis = [
-        Matrix([[sp.sympify(x.strip())] for x in row.strip().split(',') if x.strip()])
-        for row in basis_input.strip().split(';') if row.strip()
-    ]
-    # Parse shift values a
-    a_vals = [sp.sympify(a.strip()) for a in a_input.split(',') if a.strip()]
-    if len(a_vals) != k:
-        st.error(f"Please enter exactly {k} values of a.")
-    else:
-        for i, a_val in enumerate(a_vals):
-            st.markdown("---")
-            st.subheader(f"Case {i+1}: a = {a_val},  X = t - a = {t_val - a_val}")
-            derivs = get_katz_derivatives(n, t_sym, a_val, D, basis)
-            # Display each D^j(c)
-            for j, dvec in enumerate(derivs):
-                st.write(f"**D^{j}(c)**:")
-                st.write(dvec)
-            # Cyclicity check: is [c, Dc, ...] of full rank?
-            rank, det, mat = check_cyclicity(derivs, t_sym, t_val)
-            st.write(f"**Cyclicity Check at t = {t_val}**")
-            st.write(f"Rank: {rank}")
-            st.write(f"Determinant: {det}")
-            st.write("Matrix:")
-            st.write(mat)
-            if rank == n:
-                st.success("✅ Katz vector is cyclic.")
+        return [Matrix([[random.randint(0, 1)] for _ in range(n)]) for _ in range(n)]
+def generate_dataset(output_file='katz_cyclic_vector_ml/data/raw/samples_n3.csv', num_samples=10000, desired_ratio=0.5):
+    # Generate a dataset of random (D, basis, a, t) with cyclicity labels and save to CSV
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    t_sym = symbols('t')
+    t_val = 1.0
+    n = 3
+    samples = []
+    count_cyclic = 0
+    count_noncyclic = 0
+    target_cyclic = int(num_samples * desired_ratio)
+    target_noncyclic = num_samples - target_cyclic
+    attempts = 0
+    max_attempts = 3000000  # Prevent infinite loop
+    while len(samples) < num_samples and attempts < max_attempts:
+        attempts += 1
+        try:
+            D = generate_random_D(n)                  # Random D matrix
+            basis = generate_random_basis(n)          # Random basis
+            a = random.randint(1, 5)                  # Random shift valu
+            derivs = get_katz_derivatives(n, t_sym, a, D, basis)  # Compute derivatives
+            label = check_cyclicity(derivs, t_sym, t_val)         # Check cyclicity
+            # Balance cyclic/non-cyclic samples
+            if (label == 1 and count_cyclic >= target_cyclic) or (label == 0 and count_noncyclic >= target_noncyclic):
+                continue
+            row = flatten_matrix(D) + flatten_basis(basis) + [a, t_val, label]  # Prepare row
+            samples.append(row)
+            if label == 1:
+                count_cyclic += 1
             else:
-                st.error("❌ Katz vector is not cyclic.")
-except Exception as e:
-    st.error(f"Error: {e}")
-# === PART B: User-Defined Vector v ∈ V Cyclicity Check ===
-st.markdown("---")
-st.subheader("🔍 Cyclicity Check for Arbitrary Vector v ∈ V")
-user_v_input = st.text_input("Enter vector v (comma-separated)")
-try:
-    v = Matrix([sp.sympify(x.strip()) for x in user_v_input.split(',') if x.strip()])
-    if v.shape[0] != n:
-        st.error(f"Vector v must be of length {n}")
-    else:
-        vlist = [v]
-        for _ in range(1, n):
-            vlist.append(D * vlist[-1])  # Generate Dv, D²v, ..., D^{n-1}v
-        mat_v = Matrix.hstack(*vlist)
-        mat_v_eval = mat_v.subs(t_sym, t_val).evalf()
-        rank_v = mat_v_eval.rank()
-        if mat_v_eval.shape[0] == mat_v_eval.shape[1]:
-            det_v = mat_v_eval.det().evalf()
-        else:
-            det_v = "N/A"
-        st.write("Matrix formed by [v, Dv, D²v, ...]:")
-        st.write(mat_v_eval)
-        st.write(f"Rank: {rank_v}")
-        st.write(f"Determinant: {det_v}")
-        if rank_v == n:
-            st.success("✅ Vector v is cyclic.")
-        else:
-            st.error("❌ Vector v is not cyclic.")
-except Exception as e:
-    st.error(f"Error parsing vector: {e}")
+                count_noncyclic += 1
+            print(f"✅ Sample {len(samples)} | Label={label} | Cyclic={count_cyclic} Non-Cyclic={count_noncyclic}")
+        except Exception as e:
+            print(f"⚠️ Skipped due to error: {e}")
+            continue
+    # Save to CSV
+    with open(output_file, 'w', newline='') as f:
+        writer = csv.writer(f)
+        header = [f'D_{i}{j}' for i in range(n) for j in range(n)] + \
+                 [f'e{i}_{j}' for i in range(n) for j in range(n)] + \
+                 ['a', 't', 'cyclic']
+        writer.writerow(header)
+        writer.writerows(samples)
+    print(f"\n🎯 Dataset saved to: {output_file}")
+    print(f"📊 Total: {len(samples)} | Cyclic: {count_cyclic}, Non-Cyclic: {count_noncyclic}")
+if __name__ == "__main__":
+    generate_dataset()  # Run dataset generation if script is executed directly
